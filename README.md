@@ -51,7 +51,9 @@ xray-manager setup              First-time server setup
 xray-manager create             Add a new user
 xray-manager print              Print configs for all users
 xray-manager print <username>   Print configs for a specific user
-xray-manager export             Export all configs to ~/xray-configs.txt
+xray-manager delete <username>  Remove a single user
+xray-manager export             Export all configs to /root/xray-configs/xray-configs.txt
+xray-manager reset              Remove all users and restore config skeleton
 ```
 
 ---
@@ -104,7 +106,7 @@ Prompts for a username, then:
 - Creates the Reality inbound on first use
 - Restarts Xray
 - Prints all four connection links
-- Saves links and Reality keys to `/root/xray_user_<username>.txt`
+- Saves links and Reality keys to `/root/xray-configs/xray_user_<username>.txt`
 
 ---
 
@@ -124,13 +126,33 @@ If the username is not found, the script tells you to run `create`.
 
 ---
 
+### Deleting a user
+
+```bash
+sudo xray-manager delete john
+```
+
+Removes the user from all inbounds in `config.json` (including Reality), deletes `/root/xray-configs/xray_user_<username>.txt` if it exists, and restarts Xray. The export file is not updated automatically — run `export` again if you need a fresh copy.
+
+---
+
 ### Exporting all configs
 
 ```bash
 sudo xray-manager export
 ```
 
-Writes all user connection links to `~/xray-configs.txt` in plain text, ready to copy or share.
+Writes all user connection links to `/root/xray-configs/xray-configs.txt` in plain text, ready to copy or share.
+
+---
+
+### Resetting all users
+
+```bash
+sudo xray-manager reset
+```
+
+Removes every user from `config.json`, restores the empty setup skeleton (including removing the Reality inbound), deletes everything in `/root/xray-configs/`, and restarts Xray. You must type `yes` to confirm. Nginx sites and `xray-manager.conf` are not changed.
 
 ---
 
@@ -200,8 +222,9 @@ bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release
 /usr/local/bin/xray-manager.conf      Saved defaults (created by setup)
 /usr/local/etc/xray/config.json       Xray config
 /etc/nginx/sites-available/           Nginx site configs
-/root/xray_user_<name>.txt            Per-user config file (created by create)
-~/xray-configs.txt                    Full export (created by export)
+/root/xray-configs/                  All saved user configs and exports
+/root/xray-configs/xray_user_<name>.txt Per-user config file (created by create)
+/root/xray-configs/xray-configs.txt    Full export (created by export)
 ```
 
 ---

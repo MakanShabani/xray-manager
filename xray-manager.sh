@@ -2,7 +2,7 @@
 
 # ============================================================
 #  xray-manager
-#  Commands: setup | create | print [username] | export
+#  Commands: setup | create | print [username] | export | reset | delete <username>
 # ============================================================
 
 set -e
@@ -16,7 +16,8 @@ NGINX_SITES="/etc/nginx/sites-available"
 NGINX_ENABLED="/etc/nginx/sites-enabled"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SAVED_VARS_FILE="${SCRIPT_DIR}/xray-manager.conf"
-EXPORT_FILE="$HOME/xray-configs.txt"
+CONFIGS_DIR="/root/xray-configs"
+EXPORT_FILE="${CONFIGS_DIR}/xray-configs.txt"
 
 DEFAULT_SERVER_IP=""
 DEFAULT_CDN_DOMAIN="bazi.bazistation.online"
@@ -43,6 +44,15 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
+
+# ---------- Config output dir ----------
+ensure_configs_dir() {
+  mkdir -p "$CONFIGS_DIR"
+}
+
+user_config_file() {
+  echo "${CONFIGS_DIR}/xray_user_${1}.txt"
+}
 
 # ---------- Load saved vars (written by setup) ----------
 load_saved_vars() {
@@ -81,6 +91,8 @@ usage() {
   echo -e "  $0 print               — Print configs for ALL users"
   echo -e "  $0 print <username>    — Print configs for a specific user"
   echo -e "  $0 export              — Export all configs to ${EXPORT_FILE}"
+  echo -e "  $0 reset               — Remove all users and restore config skeleton"
+  echo -e "  $0 delete <username>   — Remove a single user"
   echo ""
   exit 1
 }
@@ -125,7 +137,7 @@ check_deps() {
     fi
   fi
 
-  if [ "${1:-}" != "setup" ] && config_needs_skeleton; then
+  if [ "${1:-}" != "setup" ] && [ "${1:-}" != "reset" ] && config_needs_skeleton; then
     echo -e "${RED}Error: Xray config not found or empty at $CONFIG${NC}"
     echo -e "${YELLOW}Run '$0 setup' first.${NC}"
     exit 1
@@ -307,6 +319,34 @@ get_all_users() {
     | grep -v '\-reality$' | sort
 }
 
+user_exists() {
+  jq -e --arg u "$1" '.inbounds[].settings.clients[]? | select(.email == $u)' "$CONFIG" > /dev/null 2>&1
+}
+
+remove_user_from_config() {
+  local username="$1"
+  local reality_email="${username}-reality"
+
+  jq --arg u "$username" --arg re "$reality_email" '
+    .inbounds |= map(
+      if .tag == "vless-ws" or .tag == "vless-grpc" or .tag == "inbound-80" then
+        .settings.clients |= map(select(.email != $u))
+      elif .tag == "vless-reality" then
+        ((.settings.clients | map(.email) | index($re)) // null) as $idx |
+        .settings.clients |= map(select(.email != $re))
+        | if $idx != null then
+            .streamSettings.realitySettings.shortIds |= (
+              .[0:$idx] + .[($idx + 1):]
+            )
+          else .
+          end
+      else .
+      end
+    )
+    | .inbounds |= map(select(.tag != "vless-reality" or (.settings.clients | length) > 0))
+  ' "$CONFIG" > "${CONFIG}.tmp" && mv "${CONFIG}.tmp" "$CONFIG"
+}
+
 # ---------- Xray config helpers ----------
 config_needs_skeleton() {
   if [ ! -f "$CONFIG" ]; then return 0; fi
@@ -385,6 +425,16 @@ ensure_xray_config() {
     return 0
   fi
   echo -e "${GREEN}Using existing Xray config at $CONFIG${NC}"
+}
+
+restore_xray_config_skeleton() {
+  mkdir -p "$(dirname "$CONFIG")"
+  if [ -f "$CONFIG" ]; then
+    cp "$CONFIG" "${CONFIG}.bak.$(date +%Y%m%d%H%M%S)"
+    echo -e "${YELLOW}Existing config backed up.${NC}"
+  fi
+  write_xray_config_skeleton
+  echo -e "${GREEN}Xray config restored to skeleton at $CONFIG${NC}"
 }
 
 # ---------- TLS cert helpers ----------
@@ -782,7 +832,8 @@ EOF
   build_links "$USERNAME" "$UUID" "$SERVER_IP" "$CDN_DOMAIN" "$VMESS_HOST" "$REALITY_SNI" "$PUBLIC_KEY" "$SHORT_ID"
   print_user_links "$USERNAME"
 
-  OUTPUT_FILE="/root/xray_user_${USERNAME}.txt"
+  ensure_configs_dir
+  OUTPUT_FILE=$(user_config_file "$USERNAME")
   {
     echo "Generated: $(date)"
     format_user_block "$USERNAME"
@@ -829,6 +880,54 @@ cmd_print() {
 }
 
 # ============================================================
+#  COMMAND: delete
+# ============================================================
+cmd_delete() {
+  check_deps
+  local username="${1:-}"
+
+  if [ -z "$username" ]; then
+    echo -e "${RED}Error: username required.${NC}"
+    echo -e "${YELLOW}Usage: $0 delete <username>${NC}"
+    exit 1
+  fi
+
+  username="${username// /_}"
+
+  if ! user_exists "$username"; then
+    echo -e "${RED}User '$username' not found in config.${NC}"
+    echo -e "${YELLOW}Use: $0 print  to list users.${NC}"
+    exit 1
+  fi
+
+  cp "$CONFIG" "${CONFIG}.bak.$(date +%Y%m%d%H%M%S)"
+  remove_user_from_config "$username"
+
+  local user_file
+  user_file=$(user_config_file "$username")
+  if [ -f "$user_file" ]; then
+    rm -f "$user_file"
+    echo -e "${GREEN}Removed: ${user_file}${NC}"
+  fi
+
+  echo -e "${GREEN}User '${username}' removed from ${CONFIG}${NC}"
+
+  echo -e "\n${CYAN}Testing Xray config...${NC}"
+  if ! test_xray_config; then
+    echo -e "${RED}Config test failed — restore the latest .bak backup if needed.${NC}"
+    exit 1
+  fi
+
+  echo -e "\n${CYAN}Restarting Xray...${NC}"
+  if systemctl restart xray 2>/dev/null; then
+    echo -e "${GREEN}Xray restarted.${NC}"
+  else
+    echo -e "${YELLOW}Could not restart Xray — restart manually: systemctl restart xray${NC}"
+  fi
+  echo ""
+}
+
+# ============================================================
 #  COMMAND: export
 # ============================================================
 cmd_export() {
@@ -841,6 +940,7 @@ cmd_export() {
     echo -e "${YELLOW}No users found in config.${NC}"; exit 0
   fi
 
+  ensure_configs_dir
   {
     echo "============================================================"
     echo "  Xray Configs Export"
@@ -859,6 +959,69 @@ cmd_export() {
 }
 
 # ============================================================
+#  COMMAND: reset
+# ============================================================
+cmd_reset() {
+  check_deps "reset"
+
+  local users user_files removed_users=0 removed_files=0 f
+
+  mapfile -t users < <(get_all_users 2>/dev/null || true)
+
+  echo -e "${CYAN}${BOLD}"
+  echo "================================================"
+  echo "         Xray User Manager — Reset             "
+  echo "================================================"
+  echo -e "${NC}"
+  echo -e "${YELLOW}This will:${NC}"
+  echo -e "  • Remove all users from ${CONFIG}"
+  echo -e "  • Restore the empty config skeleton (no Reality inbound)"
+  echo -e "  • Delete all files in ${CONFIGS_DIR}/"
+  if [ ${#users[@]} -gt 0 ]; then
+    echo -e "\n${BOLD}Users to remove (${#users[@]}):${NC} ${users[*]}"
+  else
+    echo -e "\n${YELLOW}No users found in config — skeleton will still be restored.${NC}"
+  fi
+  echo ""
+  read -rp "$(echo -e ${RED}"Type 'yes' to confirm reset: "${NC})" _confirm
+  if [ "$_confirm" != "yes" ]; then
+    echo -e "${YELLOW}Reset cancelled.${NC}"
+    exit 0
+  fi
+
+  restore_xray_config_skeleton
+
+  if [ -d "$CONFIGS_DIR" ]; then
+    shopt -s nullglob
+    for f in "${CONFIGS_DIR}"/*; do
+      rm -f "$f"
+      removed_files=$((removed_files + 1))
+    done
+    shopt -u nullglob
+  fi
+  removed_users=${#users[@]}
+
+  echo -e "\n${CYAN}Testing Xray config...${NC}"
+  if ! test_xray_config; then
+    echo -e "${RED}Config test failed after reset — check ${CONFIG}${NC}"
+    exit 1
+  fi
+
+  echo -e "\n${CYAN}Restarting Xray...${NC}"
+  if systemctl restart xray 2>/dev/null; then
+    echo -e "${GREEN}Xray restarted.${NC}"
+  else
+    echo -e "${YELLOW}Could not restart Xray — restart manually: systemctl restart xray${NC}"
+  fi
+
+  echo -e "\n${BOLD}${GREEN}Reset complete.${NC}"
+  echo -e "  Users removed from config : ${removed_users}"
+  echo -e "  User files deleted        : ${removed_files}"
+  echo -e "  Config                    : ${CONFIG}"
+  echo -e "\nRun ${BOLD}$0 create${NC} to add users again.\n"
+}
+
+# ============================================================
 #  Entry point
 # ============================================================
 
@@ -873,6 +1036,8 @@ case "$COMMAND" in
   create) cmd_create ;;
   print)  cmd_print "${1:-}" ;;
   export) cmd_export ;;
+  reset)  cmd_reset ;;
+  delete) cmd_delete "${1:-}" ;;
   *)
     echo -e "${RED}Unknown or missing command: '$COMMAND'${NC}\n"
     usage
