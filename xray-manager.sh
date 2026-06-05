@@ -125,8 +125,8 @@ check_deps() {
     fi
   fi
 
-  if [ "${1:-}" != "setup" ] && [ ! -f "$CONFIG" ]; then
-    echo -e "${RED}Error: Xray config not found at $CONFIG${NC}"
+  if [ "${1:-}" != "setup" ] && config_needs_skeleton; then
+    echo -e "${RED}Error: Xray config not found or empty at $CONFIG${NC}"
     echo -e "${YELLOW}Run '$0 setup' first.${NC}"
     exit 1
   fi
@@ -249,6 +249,86 @@ resolve_user() {
 get_all_users() {
   jq -r '[.inbounds[].settings.clients[]?.email] | unique | .[]' "$CONFIG" 2>/dev/null \
     | grep -v '\-reality$' | sort
+}
+
+# ---------- Xray config helpers ----------
+config_needs_skeleton() {
+  if [ ! -f "$CONFIG" ]; then return 0; fi
+  if [ ! -s "$CONFIG" ]; then return 0; fi
+  if ! jq empty "$CONFIG" 2>/dev/null; then return 0; fi
+  local count
+  count=$(jq '[.inbounds[]? | select(.tag == "vless-ws" or .tag == "vless-grpc" or .tag == "inbound-80")] | length' "$CONFIG" 2>/dev/null || echo 0)
+  [ "$count" -lt 3 ]
+}
+
+write_xray_config_skeleton() {
+  cat > "$CONFIG" <<EOF
+{
+  "dns": {
+    "servers": [
+      "https+local://1.1.1.1/dns-query",
+      "https+local://8.8.8.8/dns-query",
+      "1.1.1.1"
+    ]
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": ${XRAY_VLESS_GRPC_PORT},
+      "protocol": "vless",
+      "settings": { "clients": [], "decryption": "none" },
+      "streamSettings": {
+        "network": "grpc",
+        "security": "none",
+        "grpcSettings": { "serviceName": "${VLESS_GRPC_SERVICE}" }
+      },
+      "tag": "vless-grpc"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": ${XRAY_VLESS_WS_PORT},
+      "protocol": "vless",
+      "settings": { "clients": [], "decryption": "none" },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": { "path": "${VLESS_WS_PATH}" }
+      },
+      "tag": "vless-ws"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": ${XRAY_VMESS_PORT},
+      "protocol": "vmess",
+      "settings": { "clients": [] },
+      "streamSettings": {
+        "network": "httpupgrade",
+        "httpupgradeSettings": {
+          "path": "${VMESS_PATH}",
+          "host": "${DEFAULT_VMESS_HOST}"
+        }
+      },
+      "tag": "inbound-80"
+    }
+  ],
+  "outbounds": [
+    { "protocol": "freedom", "tag": "direct" }
+  ]
+}
+EOF
+}
+
+ensure_xray_config() {
+  if [ -f "$CONFIG" ] && [ -s "$CONFIG" ]; then
+    cp "$CONFIG" "${CONFIG}.bak.$(date +%Y%m%d%H%M%S)"
+    echo -e "${YELLOW}Existing config backed up.${NC}"
+  fi
+  if config_needs_skeleton; then
+    write_xray_config_skeleton
+    echo -e "${GREEN}Xray config skeleton written to $CONFIG${NC}"
+    return 0
+  fi
+  echo -e "${GREEN}Using existing Xray config at $CONFIG${NC}"
 }
 
 # ---------- TLS cert helpers ----------
@@ -399,67 +479,7 @@ cmd_setup() {
   # ---- Create xray config dir and skeleton ----
   echo -e "\n${CYAN}Creating Xray config skeleton...${NC}"
   mkdir -p "$(dirname "$CONFIG")"
-
-  if [ -f "$CONFIG" ]; then
-    cp "$CONFIG" "${CONFIG}.bak.$(date +%Y%m%d%H%M%S)"
-    echo -e "${YELLOW}Existing config backed up.${NC}"
-  else
-    cat > "$CONFIG" <<EOF
-{
-  "dns": {
-    "servers": [
-      "https+local://1.1.1.1/dns-query",
-      "https+local://8.8.8.8/dns-query",
-      "1.1.1.1"
-    ]
-  },
-  "inbounds": [
-    {
-      "listen": "127.0.0.1",
-      "port": ${XRAY_VLESS_GRPC_PORT},
-      "protocol": "vless",
-      "settings": { "clients": [], "decryption": "none" },
-      "streamSettings": {
-        "network": "grpc",
-        "security": "none",
-        "grpcSettings": { "serviceName": "${VLESS_GRPC_SERVICE}" }
-      },
-      "tag": "vless-grpc"
-    },
-    {
-      "listen": "127.0.0.1",
-      "port": ${XRAY_VLESS_WS_PORT},
-      "protocol": "vless",
-      "settings": { "clients": [], "decryption": "none" },
-      "streamSettings": {
-        "network": "ws",
-        "security": "none",
-        "wsSettings": { "path": "${VLESS_WS_PATH}" }
-      },
-      "tag": "vless-ws"
-    },
-    {
-      "listen": "127.0.0.1",
-      "port": ${XRAY_VMESS_PORT},
-      "protocol": "vmess",
-      "settings": { "clients": [] },
-      "streamSettings": {
-        "network": "httpupgrade",
-        "httpupgradeSettings": {
-          "path": "${VMESS_PATH}",
-          "host": "${DEFAULT_VMESS_HOST}"
-        }
-      },
-      "tag": "inbound-80"
-    }
-  ],
-  "outbounds": [
-    { "protocol": "freedom", "tag": "direct" }
-  ]
-}
-EOF
-    echo -e "${GREEN}Xray config created at $CONFIG${NC}"
-  fi
+  ensure_xray_config
 
   # ---- Write nginx site: TLS (VLESS WS + gRPC) ----
   echo -e "\n${CYAN}Writing nginx site: TLS (VLESS WS + gRPC)...${NC}"
@@ -584,6 +604,12 @@ EOF
 # ============================================================
 cmd_create() {
   check_deps "create"
+
+  if config_needs_skeleton; then
+    echo -e "${RED}Error: Xray config at $CONFIG is missing or empty.${NC}"
+    echo -e "${YELLOW}Run '$0 setup' first to create the config skeleton.${NC}"
+    exit 1
+  fi
 
   echo -e "${CYAN}${BOLD}"
   echo "================================================"
