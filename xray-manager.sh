@@ -251,6 +251,87 @@ get_all_users() {
     | grep -v '\-reality$' | sort
 }
 
+# ---------- TLS cert helpers ----------
+cert_exists() {
+  [ -f "/etc/letsencrypt/live/${DEFAULT_CDN_DOMAIN}/fullchain.pem" ] \
+    && [ -f "/etc/letsencrypt/live/${DEFAULT_CDN_DOMAIN}/privkey.pem" ]
+}
+
+write_nginx_tls_site() {
+  cat > "$NGINX_TLS_SITE" <<EOF
+server {
+    listen ${DEFAULT_CDN_PORT} ssl http2;
+    server_name ${DEFAULT_CDN_DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${DEFAULT_CDN_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DEFAULT_CDN_DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    # VLESS + WebSocket
+    location ${VLESS_WS_PATH} {
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:${XRAY_VLESS_WS_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_read_timeout 86400;
+    }
+
+    # VLESS + gRPC
+    location /${VLESS_GRPC_SERVICE} {
+        grpc_pass grpc://127.0.0.1:${XRAY_VLESS_GRPC_PORT};
+        grpc_set_header Host \$host;
+        grpc_set_header X-Real-IP \$remote_addr;
+        grpc_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        grpc_read_timeout 86400s;
+        grpc_send_timeout 86400s;
+        grpc_buffer_size 4k;
+    }
+
+    # Block everything else
+    location / {
+        return 404;
+    }
+}
+EOF
+}
+
+write_nginx_tls_bootstrap() {
+  local webroot="/var/www/certbot"
+  mkdir -p "$webroot"
+  cat > "$NGINX_TLS_SITE" <<EOF
+server {
+    listen 80;
+    server_name ${DEFAULT_CDN_DOMAIN};
+
+    location /.well-known/acme-challenge/ {
+        root ${webroot};
+    }
+
+    location / {
+        return 404;
+    }
+}
+EOF
+}
+
+reload_nginx_if_ok() {
+  if nginx -t 2>/dev/null; then
+    systemctl reload nginx && echo -e "${GREEN}Nginx reloaded.${NC}"
+    return 0
+  fi
+  echo -e "${RED}Nginx config test failed — please fix before reloading.${NC}"
+  nginx -t
+  return 1
+}
+
 # ============================================================
 #  COMMAND: setup
 # ============================================================
@@ -383,50 +464,14 @@ EOF
   # ---- Write nginx site: TLS (VLESS WS + gRPC) ----
   echo -e "\n${CYAN}Writing nginx site: TLS (VLESS WS + gRPC)...${NC}"
   NGINX_TLS_SITE="${NGINX_SITES}/${DEFAULT_CDN_DOMAIN}.conf"
-  cat > "$NGINX_TLS_SITE" <<EOF
-server {
-    listen ${DEFAULT_CDN_PORT} ssl http2;
-    server_name ${DEFAULT_CDN_DOMAIN};
-
-    ssl_certificate     /etc/letsencrypt/live/${DEFAULT_CDN_DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${DEFAULT_CDN_DOMAIN}/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers off;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
-
-    # VLESS + WebSocket
-    location ${VLESS_WS_PATH} {
-        proxy_redirect off;
-        proxy_pass http://127.0.0.1:${XRAY_VLESS_WS_PORT};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_buffering off;
-        proxy_read_timeout 86400;
-    }
-
-    # VLESS + gRPC
-    location /${VLESS_GRPC_SERVICE} {
-        grpc_pass grpc://127.0.0.1:${XRAY_VLESS_GRPC_PORT};
-        grpc_set_header Host \$host;
-        grpc_set_header X-Real-IP \$remote_addr;
-        grpc_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        grpc_read_timeout 86400s;
-        grpc_send_timeout 86400s;
-        grpc_buffer_size 4k;
-    }
-
-    # Block everything else
-    location / {
-        return 404;
-    }
-}
-EOF
-  echo -e "${GREEN}Written: ${NGINX_TLS_SITE}${NC}"
+  if cert_exists; then
+    write_nginx_tls_site
+    echo -e "${GREEN}Written (TLS): ${NGINX_TLS_SITE}${NC}"
+  else
+    write_nginx_tls_bootstrap
+    echo -e "${GREEN}Written (HTTP bootstrap for certbot): ${NGINX_TLS_SITE}${NC}"
+    echo -e "${YELLOW}Port 80 is used temporarily until Let's Encrypt issues a certificate.${NC}"
+  fi
 
   # ---- Write nginx site: VMess HTTPUpgrade (plain HTTP) ----
   echo -e "\n${CYAN}Writing nginx site: VMess HTTPUpgrade...${NC}"
@@ -465,7 +510,11 @@ EOF
 
   # ---- Open firewall ports ----
   echo -e "\n${CYAN}Opening firewall ports...${NC}"
-  for port in "$DEFAULT_CDN_PORT" "$DEFAULT_VMESS_PORT" "$DEFAULT_REALITY_PORT"; do
+  FIREWALL_PORTS=("$DEFAULT_CDN_PORT" "$DEFAULT_VMESS_PORT" "$DEFAULT_REALITY_PORT")
+  if ! cert_exists; then
+    FIREWALL_PORTS+=("80")
+  fi
+  for port in "${FIREWALL_PORTS[@]}"; do
     if ufw status | grep -q "Status: active"; then
       ufw allow "${port}/tcp" && echo -e "${GREEN}Opened port ${port}/tcp${NC}"
     else
@@ -473,34 +522,44 @@ EOF
     fi
   done
 
+  # ---- Start nginx (bootstrap config must load before certbot) ----
+  echo -e "\n${CYAN}Testing nginx config...${NC}"
+  reload_nginx_if_ok || true
+
   # ---- Run certbot ----
   echo -e "\n${CYAN}SSL Certificate for ${DEFAULT_CDN_DOMAIN}${NC}"
-  echo -e "${YELLOW}Note: DNS for ${DEFAULT_CDN_DOMAIN} must already point to this server IP.${NC}"
-  read -rp "$(echo -e ${YELLOW}"Run certbot now? [y/N]: "${NC})" _run_certbot
-  if [[ "$_run_certbot" =~ ^[Yy]$ ]]; then
-    read -rp "$(echo -e ${YELLOW}"Email for certbot notifications (required): "${NC})" CERTBOT_EMAIL
-    if [ -z "$CERTBOT_EMAIL" ]; then
-      echo -e "${RED}Email is required for certbot. Skipping certificate issuance.${NC}"
-      echo -e "${YELLOW}Run manually: certbot certonly --nginx -d ${DEFAULT_CDN_DOMAIN} --email you@example.com --agree-tos${NC}"
-    else
-      certbot certonly --nginx -d "$DEFAULT_CDN_DOMAIN" \
-        --non-interactive --agree-tos --email "$CERTBOT_EMAIL" \
-        && echo -e "${GREEN}Certificate issued for ${DEFAULT_CDN_DOMAIN}${NC}" \
-        || echo -e "${RED}Certbot failed — run manually:\n  certbot certonly --nginx -d ${DEFAULT_CDN_DOMAIN} --email ${CERTBOT_EMAIL} --agree-tos${NC}"
-    fi
+  echo -e "${YELLOW}Note: DNS for ${DEFAULT_CDN_DOMAIN} must point to this server and port 80 must be reachable.${NC}"
+  if cert_exists; then
+    echo -e "${GREEN}Certificate already present — skipping certbot.${NC}"
   else
-    echo -e "${YELLOW}Skipped certbot. Run manually before reloading nginx:${NC}"
-    echo -e "  certbot certonly --nginx -d ${DEFAULT_CDN_DOMAIN} --email you@example.com --agree-tos"
+    read -rp "$(echo -e ${YELLOW}"Run certbot now? [y/N]: "${NC})" _run_certbot
+    if [[ "$_run_certbot" =~ ^[Yy]$ ]]; then
+      read -rp "$(echo -e ${YELLOW}"Email for certbot notifications (required): "${NC})" CERTBOT_EMAIL
+      if [ -z "$CERTBOT_EMAIL" ]; then
+        echo -e "${RED}Email is required for certbot. Skipping certificate issuance.${NC}"
+        echo -e "${YELLOW}Run manually: certbot certonly --webroot -w /var/www/certbot -d ${DEFAULT_CDN_DOMAIN} --email you@example.com --agree-tos${NC}"
+      elif certbot certonly --webroot -w /var/www/certbot -d "$DEFAULT_CDN_DOMAIN" \
+        --non-interactive --agree-tos --email "$CERTBOT_EMAIL"; then
+        echo -e "${GREEN}Certificate issued for ${DEFAULT_CDN_DOMAIN}${NC}"
+        write_nginx_tls_site
+        echo -e "${GREEN}Updated nginx site to TLS: ${NGINX_TLS_SITE}${NC}"
+      else
+        echo -e "${RED}Certbot failed — nginx is still on the HTTP bootstrap config.${NC}"
+        echo -e "${YELLOW}Fix DNS/firewall, then run manually:${NC}"
+        echo -e "  certbot certonly --webroot -w /var/www/certbot -d ${DEFAULT_CDN_DOMAIN} --email ${CERTBOT_EMAIL} --agree-tos"
+        echo -e "${YELLOW}After the certificate is issued, re-run: $0 setup${NC}"
+      fi
+    else
+      echo -e "${YELLOW}Skipped certbot. Nginx is on the HTTP bootstrap config until a certificate exists.${NC}"
+      echo -e "${YELLOW}Run manually:${NC}"
+      echo -e "  certbot certonly --webroot -w /var/www/certbot -d ${DEFAULT_CDN_DOMAIN} --email you@example.com --agree-tos"
+      echo -e "${YELLOW}Then re-run: $0 setup${NC}"
+    fi
   fi
 
   # ---- Test and reload nginx ----
   echo -e "\n${CYAN}Testing nginx config...${NC}"
-  if nginx -t 2>/dev/null; then
-    systemctl reload nginx && echo -e "${GREEN}Nginx reloaded.${NC}"
-  else
-    echo -e "${RED}Nginx config test failed — please fix before reloading.${NC}"
-    nginx -t
-  fi
+  reload_nginx_if_ok || true
 
   # ---- Restart xray ----
   echo -e "\n${CYAN}Starting Xray...${NC}"

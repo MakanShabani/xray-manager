@@ -35,10 +35,12 @@ Each user gets four ready-to-import connection links:
 ## Installation
 
 ```bash
-curl -O https://raw.githubusercontent.com/MakanShabani/xray-manager/main/xray-manager
-chmod +x xray-manager
-sudo mv xray-manager /usr/local/bin/xray-manager
+curl -O https://raw.githubusercontent.com/MakanShabani/xray-manager/master/xray-manager.sh
+chmod +x xray-manager.sh
+sudo mv xray-manager.sh /usr/local/bin/xray-manager
 ```
+
+Verify the download before moving it — the first line should read `#!/bin/bash`, not `404: Not Found`.
 
 ---
 
