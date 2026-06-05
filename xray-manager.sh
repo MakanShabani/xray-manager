@@ -204,6 +204,65 @@ ${LINK_REALITY}
 EOF
 }
 
+# ---------- X25519 / config test helpers ----------
+parse_x25519_private_key() {
+  echo "$1" | grep -E 'PrivateKey:|Private key:' | head -1 | sed -E 's/^[^:]*:[[:space:]]*//'
+}
+
+parse_x25519_public_key() {
+  echo "$1" | grep -E 'Password(\(PublicKey\))?:|Public key:|PublicKey:' | head -1 | sed -E 's/^[^:]*:[[:space:]]*//'
+}
+
+generate_reality_keypair() {
+  local output
+  output=$(xray x25519)
+  PRIVATE_KEY=$(parse_x25519_private_key "$output")
+  PUBLIC_KEY=$(parse_x25519_public_key "$output")
+  if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
+    echo -e "${RED}Failed to parse xray x25519 output:${NC}"
+    echo "$output"
+    exit 1
+  fi
+}
+
+derive_public_key_from_private() {
+  local output priv="$1"
+  [ -n "$priv" ] || return 1
+  output=$(xray x25519 -i "$priv")
+  parse_x25519_public_key "$output"
+}
+
+reality_public_key_from_config() {
+  local pubkey privkey
+  pubkey=$(jq -r '
+    .inbounds[] | select(.tag == "vless-reality") |
+    .streamSettings.realitySettings |
+    if has("publicKey") then .publicKey else empty end
+  ' "$CONFIG" 2>/dev/null | head -1 || true)
+  if [ -n "$pubkey" ] && [ "$pubkey" != "null" ]; then
+    echo "$pubkey"
+    return 0
+  fi
+  privkey=$(jq -r '
+    .inbounds[] | select(.tag == "vless-reality") |
+    .streamSettings.realitySettings.privateKey
+  ' "$CONFIG" 2>/dev/null | head -1 || true)
+  if [ -n "$privkey" ] && [ "$privkey" != "null" ]; then
+    derive_public_key_from_private "$privkey"
+  fi
+}
+
+test_xray_config() {
+  local err
+  if err=$(xray run -test -config "$CONFIG" 2>&1); then
+    echo -e "${GREEN}Xray config test passed.${NC}"
+    return 0
+  fi
+  echo -e "${RED}Xray config test failed:${NC}"
+  echo "$err"
+  return 1
+}
+
 # ---------- Resolve user from config ----------
 resolve_user() {
   local username="$1"
@@ -219,11 +278,8 @@ resolve_user() {
     ' "$CONFIG" 2>/dev/null || true)
   fi
 
-  R_PUBKEY=$(jq -r '
-    .inbounds[] | select(.tag == "vless-reality") |
-    .streamSettings.realitySettings |
-    if has("publicKey") then .publicKey else "PUBKEY_NOT_IN_CONFIG" end
-  ' "$CONFIG" 2>/dev/null | head -1 || true)
+  R_PUBKEY=$(reality_public_key_from_config)
+  R_PUBKEY="${R_PUBKEY:-PUBKEY_NOT_IN_CONFIG}"
 
   R_SHORTID=$(jq -r --arg u "${username}-reality" '
     .inbounds[] | select(.tag == "vless-reality") |
@@ -583,7 +639,7 @@ EOF
 
   # ---- Restart xray ----
   echo -e "\n${CYAN}Starting Xray...${NC}"
-  if systemctl restart xray 2>/dev/null; then
+  if test_xray_config && systemctl restart xray 2>/dev/null; then
     echo -e "${GREEN}Xray started.${NC}"
   else
     echo -e "${YELLOW}Could not start Xray — start manually: systemctl start xray${NC}"
@@ -640,9 +696,7 @@ cmd_create() {
   UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr '[:upper:]' '[:lower:]')
 
   echo -e "\n${CYAN}Generating Reality keypair...${NC}"
-  KEYPAIR=$(xray x25519)
-  PRIVATE_KEY=$(echo "$KEYPAIR" | grep "Private key" | awk '{print $3}')
-  PUBLIC_KEY=$(echo "$KEYPAIR" | grep "Public key" | awk '{print $3}')
+  generate_reality_keypair
   SHORT_ID=$(openssl rand -hex 8)
 
   echo -e "${GREEN}UUID:${NC}                $UUID"
@@ -692,7 +746,6 @@ cmd_create() {
       "dest": "${REALITY_SNI}:443",
       "serverNames": ["$REALITY_SNI"],
       "privateKey": "$PRIVATE_KEY",
-      "publicKey": "$PUBLIC_KEY",
       "shortIds": ["$SHORT_ID"]
     }
   },
@@ -710,7 +763,13 @@ EOF
       '(.inbounds[] | select(.tag == $tag) | .streamSettings.realitySettings.shortIds) += [$sid]' \
       "$CONFIG" > "${CONFIG}.tmp" && mv "${CONFIG}.tmp" "$CONFIG"
     echo -e "${YELLOW}Reality inbound exists — user and shortId appended.${NC}"
-    PUBLIC_KEY=$(jq -r '.inbounds[] | select(.tag=="vless-reality") | .streamSettings.realitySettings.publicKey' "$CONFIG" 2>/dev/null || echo "$PUBLIC_KEY")
+    PUBLIC_KEY=$(reality_public_key_from_config || echo "$PUBLIC_KEY")
+  fi
+
+  echo -e "\n${CYAN}Testing Xray config...${NC}"
+  if ! test_xray_config; then
+    echo -e "${RED}Aborting — fix config.json or restore the latest .bak backup.${NC}"
+    exit 1
   fi
 
   echo -e "\n${CYAN}Restarting Xray...${NC}"
