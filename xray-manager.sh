@@ -218,11 +218,15 @@ EOF
 
 # ---------- X25519 / config test helpers ----------
 parse_x25519_private_key() {
-  echo "$1" | grep -E 'PrivateKey:|Private key:' | head -1 | sed -E 's/^[^:]*:[[:space:]]*//'
+  echo "$1" | awk -F': ' '
+    /^PrivateKey:/ || /^Private key:/ { print $2; exit }
+  '
 }
 
 parse_x25519_public_key() {
-  echo "$1" | grep -E 'Password(\(PublicKey\))?:|Public key:|PublicKey:' | head -1 | sed -E 's/^[^:]*:[[:space:]]*//'
+  echo "$1" | awk -F': ' '
+    /^Password/ || /^Public key:/ || /^PublicKey:/ { print $2; exit }
+  '
 }
 
 generate_reality_keypair() {

@@ -1,6 +1,6 @@
 # xray-manager
 
-A single-file Bash script for managing [Xray](https://github.com/XTLS/Xray-core) proxy users on a Linux server. Handles first-time server setup, user creation, config generation, and export — with support for three proxy configurations per user out of the box.
+A single-file Bash script for managing [Xray](https://github.com/XTLS/Xray-core) proxy users on a Linux server. Handles first-time server setup, user creation, config generation, export, and cleanup — with four proxy configurations per user out of the box.
 
 ---
 
@@ -27,6 +27,7 @@ Each user gets four ready-to-import connection links:
 - Root or sudo access
 - [Xray-core](https://github.com/XTLS/Xray-core) installed
 - A domain pointed at your server (for TLS + CDN configs)
+- Port **80** reachable on the server during initial Let's Encrypt certificate issuance
 
 > `nginx`, `certbot`, `jq`, and `openssl` are installed automatically by the script if missing.
 
@@ -90,6 +91,10 @@ After setup, your server will have:
 /usr/local/bin/xray-manager.conf              Saved defaults
 ```
 
+**SSL certificate flow:** if no certificate exists yet, setup writes a temporary HTTP-only nginx config on port 80 for the ACME challenge, starts nginx, then runs certbot with `--webroot`. After the certificate is issued, the full TLS config on port 443 is written automatically. If Cloudflare proxies your domain (orange cloud), set the DNS record to **DNS only** (grey cloud) until the certificate is issued.
+
+**Existing Xray install:** if the Xray installer already created `/usr/local/etc/xray/config.json` (even empty), setup detects a missing or invalid skeleton and writes the correct one.
+
 ---
 
 ### Adding a user
@@ -103,10 +108,13 @@ Prompts for a username, then:
 - Generates a UUID
 - Generates a Reality keypair (`xray x25519`) and a short ID
 - Adds the user to all inbounds in `config.json`
-- Creates the Reality inbound on first use
+- Creates the Reality inbound on first use (or adds to the existing one)
+- Validates the config with `xray run -test` before restarting
 - Restarts Xray
 - Prints all four connection links
 - Saves links and Reality keys to `/root/xray-configs/xray_user_<username>.txt`
+
+If the Reality inbound was removed (e.g. after deleting the last user), `create` recreates it with a **new** keypair. If other users still exist, the new user is added to the existing Reality inbound and shares its keys.
 
 ---
 
@@ -132,7 +140,9 @@ If the username is not found, the script tells you to run `create`.
 sudo xray-manager delete john
 ```
 
-Removes the user from all inbounds in `config.json` (including Reality), deletes `/root/xray-configs/xray_user_<username>.txt` if it exists, and restarts Xray. The export file is not updated automatically — run `export` again if you need a fresh copy.
+Removes the user from all inbounds in `config.json` (including Reality and their `shortId`), deletes `/root/xray-configs/xray_user_<username>.txt` if it exists, validates the config, and restarts Xray.
+
+If the deleted user was the **last** Reality user, the entire Reality inbound is removed. The next `create` will recreate it automatically. The export file is not updated automatically — run `export` again if you need a fresh copy.
 
 ---
 
@@ -218,13 +228,46 @@ bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release
 ## File Layout
 
 ```
-/usr/local/bin/xray-manager           The script
-/usr/local/bin/xray-manager.conf      Saved defaults (created by setup)
-/usr/local/etc/xray/config.json       Xray config
-/etc/nginx/sites-available/           Nginx site configs
-/root/xray-configs/                  All saved user configs and exports
-/root/xray-configs/xray_user_<name>.txt Per-user config file (created by create)
-/root/xray-configs/xray-configs.txt    Full export (created by export)
+/usr/local/bin/xray-manager                    The script
+/usr/local/bin/xray-manager.conf               Saved defaults (created by setup)
+/usr/local/etc/xray/config.json                Xray config
+/usr/local/etc/xray/config.json.bak.*          Automatic backups before changes
+/etc/nginx/sites-available/                    Nginx site configs
+/root/xray-configs/                            All saved user configs and exports
+/root/xray-configs/xray_user_<name>.txt        Per-user config file (created by create)
+/root/xray-configs/xray-configs.txt            Full export (created by export)
+```
+
+---
+
+## Troubleshooting
+
+**Xray fails to start (exit code 23)**
+
+Run the config test to see the exact error:
+
+```bash
+sudo xray run -test -config /usr/local/etc/xray/config.json
+sudo journalctl -u xray -n 30 --no-pager
+```
+
+Common causes: empty or invalid `config.json`, empty Reality `privateKey` after a failed `create`, or port already in use.
+
+**Empty `config.json` after setup**
+
+Re-run setup with the latest script — it detects empty or invalid configs and writes the skeleton even if the file already exists.
+
+**Certbot / nginx SSL errors**
+
+Setup uses a temporary HTTP config on port 80 before certificates exist. Ensure port 80 is open and the domain points directly to the server (disable Cloudflare proxy during issuance). After a failed run, re-run `sudo xray-manager setup` once DNS and firewall are correct.
+
+**Manual certificate issuance**
+
+```bash
+sudo mkdir -p /var/www/certbot
+sudo certbot certonly --webroot -w /var/www/certbot \
+  -d your.cdn.domain --email you@example.com --agree-tos
+sudo xray-manager setup
 ```
 
 ---
