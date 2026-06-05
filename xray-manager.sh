@@ -217,26 +217,46 @@ EOF
 }
 
 # ---------- X25519 / config test helpers ----------
+# Supports old output (Private key / Public key) and new output (PrivateKey / Password (PublicKey)).
 parse_x25519_private_key() {
-  echo "$1" | awk -F': ' '
-    /^PrivateKey:/ || /^Private key:/ { print $2; exit }
-  '
+  local line val
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line//$'\r'/}"
+    case "$line" in
+      PrivateKey:*|Private\ key:*)
+        val="${line#*:}"
+        val="${val#"${val%%[![:space:]]*}"}"
+        printf '%s' "$val"
+        return 0
+        ;;
+    esac
+  done <<< "$1"
 }
 
 parse_x25519_public_key() {
-  echo "$1" | awk -F': ' '
-    /^Password/ || /^Public key:/ || /^PublicKey:/ { print $2; exit }
-  '
+  local line val
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line//$'\r'/}"
+    case "$line" in
+      Password*|Public\ key:*|PublicKey:*)
+        val="${line#*:}"
+        val="${val#"${val%%[![:space:]]*}"}"
+        printf '%s' "$val"
+        return 0
+        ;;
+    esac
+  done <<< "$1"
 }
 
 generate_reality_keypair() {
   local output
-  output=$(xray x25519)
+  output=$(xray x25519 2>&1)
   PRIVATE_KEY=$(parse_x25519_private_key "$output")
   PUBLIC_KEY=$(parse_x25519_public_key "$output")
   if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
     echo -e "${RED}Failed to parse xray x25519 output:${NC}"
     echo "$output"
+    echo -e "${YELLOW}Ensure /usr/local/bin/xray-manager is up to date, then retry.${NC}"
     exit 1
   fi
 }
