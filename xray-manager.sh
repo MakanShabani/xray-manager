@@ -54,6 +54,17 @@ user_config_file() {
   echo "${CONFIGS_DIR}/xray_user_${1}.txt"
 }
 
+user_qrcode_file() {
+  echo "${CONFIGS_DIR}/xray_user_${1}_${2}.png"
+}
+
+remove_user_qrcodes() {
+  local user="$1" kind
+  for kind in ws grpc vmess reality; do
+    rm -f "$(user_qrcode_file "$user" "$kind")"
+  done
+}
+
 # ---------- Load saved vars (written by setup) ----------
 load_saved_vars() {
   if [ -f "$SAVED_VARS_FILE" ]; then
@@ -176,6 +187,54 @@ build_links() {
   fi
 }
 
+# ---------- QR codes (requires qrencode) ----------
+ensure_qrencode() {
+  ensure_apt_pkg qrencode
+}
+
+link_is_scannable() {
+  [[ "${1:-}" == *"://"* ]]
+}
+
+print_link_qrcode() {
+  local label="$1" link="$2"
+  link_is_scannable "$link" || return 0
+  ensure_qrencode
+  echo -e "${BOLD}  QR — ${label}${NC}"
+  qrencode -t ANSIUTF8 -m 1 -o - "$link" 2>/dev/null \
+    || qrencode -t ANSI -m 1 -o - "$link" 2>/dev/null \
+    || qrencode -t UTF8 -m 1 -o - "$link"
+  echo ""
+}
+
+save_link_qrcode() {
+  local file="$1" link="$2"
+  link_is_scannable "$link" || return 0
+  ensure_qrencode
+  qrencode -t PNG -m 2 -o "$file" "$link"
+}
+
+save_user_qrcodes() {
+  local user="$1"
+  ensure_configs_dir
+  save_link_qrcode "$(user_qrcode_file "$user" ws)" "$LINK_WS"
+  save_link_qrcode "$(user_qrcode_file "$user" grpc)" "$LINK_GRPC"
+  save_link_qrcode "$(user_qrcode_file "$user" vmess)" "$LINK_VMESS"
+  save_link_qrcode "$(user_qrcode_file "$user" reality)" "$LINK_REALITY"
+}
+
+format_qr_paths() {
+  local user="$1"
+  cat <<EOF
+
+QR code images (PNG):
+  WS      : $(user_qrcode_file "$user" ws)
+  gRPC    : $(user_qrcode_file "$user" grpc)
+  VMess   : $(user_qrcode_file "$user" vmess)
+  Reality : $(user_qrcode_file "$user" reality)
+EOF
+}
+
 # ---------- Print links (colored) ----------
 print_user_links() {
   local user="$1"
@@ -190,6 +249,11 @@ print_user_links() {
   echo -e "${DIM}${LINK_VMESS}${NC}\n"
   echo -e "${BOLD}[4] VLESS + Reality${NC}"
   echo -e "${DIM}${LINK_REALITY}${NC}"
+  echo -e "\n${BOLD}${CYAN}  QR Codes (scan with your client app)${NC}"
+  print_link_qrcode "VLESS WS" "$LINK_WS"
+  print_link_qrcode "VLESS gRPC" "$LINK_GRPC"
+  print_link_qrcode "VMess HTTPUpgrade" "$LINK_VMESS"
+  print_link_qrcode "VLESS Reality" "$LINK_REALITY"
 }
 
 # ---------- Format user block (plain text) ----------
@@ -855,18 +919,22 @@ EOF
 
   build_links "$USERNAME" "$UUID" "$SERVER_IP" "$CDN_DOMAIN" "$VMESS_HOST" "$REALITY_SNI" "$PUBLIC_KEY" "$SHORT_ID"
   print_user_links "$USERNAME"
+  save_user_qrcodes "$USERNAME"
 
   ensure_configs_dir
   OUTPUT_FILE=$(user_config_file "$USERNAME")
   {
     echo "Generated: $(date)"
     format_user_block "$USERNAME"
+    format_qr_paths "$USERNAME"
+    echo ""
     echo "Reality Private Key : $PRIVATE_KEY"
     echo "Reality Public Key  : $PUBLIC_KEY"
     echo "Reality Short ID    : $SHORT_ID"
   } > "$OUTPUT_FILE"
 
-  echo -e "\n${GREEN}Saved to: ${BOLD}${OUTPUT_FILE}${NC}\n"
+  echo -e "\n${GREEN}Saved to: ${BOLD}${OUTPUT_FILE}${NC}"
+  echo -e "${GREEN}QR codes saved in: ${BOLD}${CONFIGS_DIR}/${NC}\n"
 }
 
 # ============================================================
@@ -886,6 +954,8 @@ cmd_print() {
     fi
     build_links "$username" "$R_UUID" "$R_IP" "$R_CDN" "$R_VMHOST" "$R_RSNI" "$R_PUBKEY" "$R_SHORTID"
     print_user_links "$username"
+    save_user_qrcodes "$username"
+    echo -e "${GREEN}QR codes saved in: ${BOLD}${CONFIGS_DIR}/${NC}"
   else
     local users
     mapfile -t users < <(get_all_users)
@@ -898,6 +968,7 @@ cmd_print() {
       [ -z "$R_UUID" ] && continue
       build_links "$u" "$R_UUID" "$R_IP" "$R_CDN" "$R_VMHOST" "$R_RSNI" "$R_PUBKEY" "$R_SHORTID"
       print_user_links "$u"
+      save_user_qrcodes "$u"
     done
   fi
   echo ""
@@ -933,6 +1004,8 @@ cmd_delete() {
     rm -f "$user_file"
     echo -e "${GREEN}Removed: ${user_file}${NC}"
   fi
+  remove_user_qrcodes "$username"
+  echo -e "${GREEN}Removed QR codes for '${username}'${NC}"
 
   echo -e "${GREEN}User '${username}' removed from ${CONFIG}${NC}"
 

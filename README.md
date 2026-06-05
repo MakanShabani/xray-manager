@@ -29,7 +29,7 @@ Each user gets four ready-to-import connection links:
 - A domain pointed at your server (for TLS + CDN configs)
 - Port **80** reachable on the server during initial Let's Encrypt certificate issuance
 
-> `nginx`, `certbot`, `jq`, and `openssl` are installed automatically by the script if missing.
+> `nginx`, `certbot`, `jq`, `openssl`, and `qrencode` are installed automatically by the script if missing.
 
 ---
 
@@ -111,8 +111,18 @@ Prompts for a username, then:
 - Creates the Reality inbound on first use (or adds to the existing one)
 - Validates the config with `xray run -test` before restarting
 - Restarts Xray
-- Prints all four connection links
-- Saves links and Reality keys to `/root/xray-configs/xray_user_<username>.txt`
+- Prints all four connection links and terminal QR codes
+- Saves links, Reality keys, and QR code PNGs to `/root/xray-configs/`
+
+**Per-user files created:**
+
+```
+/root/xray-configs/xray_user_<username>.txt
+/root/xray-configs/xray_user_<username>_ws.png
+/root/xray-configs/xray_user_<username>_grpc.png
+/root/xray-configs/xray_user_<username>_vmess.png
+/root/xray-configs/xray_user_<username>_reality.png
+```
 
 If the Reality inbound was removed (e.g. after deleting the last user), `create` recreates it with a **new** keypair. If other users still exist, the new user is added to the existing Reality inbound and shares its keys.
 
@@ -130,6 +140,8 @@ sudo xray-manager print
 
 Reads UUIDs, Reality public keys, and short IDs directly from `config.json`. You only need to enter the server IP if it was not saved during setup.
 
+Shows each link in the terminal with a scannable QR code and refreshes the PNG files in `/root/xray-configs/`.
+
 If the username is not found, the script tells you to run `create`.
 
 ---
@@ -140,7 +152,7 @@ If the username is not found, the script tells you to run `create`.
 sudo xray-manager delete john
 ```
 
-Removes the user from all inbounds in `config.json` (including Reality and their `shortId`), deletes `/root/xray-configs/xray_user_<username>.txt` if it exists, validates the config, and restarts Xray.
+Removes the user from all inbounds in `config.json` (including Reality and their `shortId`), deletes `/root/xray-configs/xray_user_<username>.txt` and QR PNG files if they exist, validates the config, and restarts Xray.
 
 If the deleted user was the **last** Reality user, the entire Reality inbound is removed. The next `create` will recreate it automatically. The export file is not updated automatically — run `export` again if you need a fresh copy.
 
@@ -235,6 +247,10 @@ bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release
 /etc/nginx/sites-available/                    Nginx site configs
 /root/xray-configs/                            All saved user configs and exports
 /root/xray-configs/xray_user_<name>.txt        Per-user config file (created by create)
+/root/xray-configs/xray_user_<name>_ws.png     QR code — VLESS WebSocket
+/root/xray-configs/xray_user_<name>_grpc.png   QR code — VLESS gRPC
+/root/xray-configs/xray_user_<name>_vmess.png   QR code — VMess
+/root/xray-configs/xray_user_<name>_reality.png QR code — VLESS Reality
 /root/xray-configs/xray-configs.txt            Full export (created by export)
 ```
 
