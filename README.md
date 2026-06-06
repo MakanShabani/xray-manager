@@ -10,12 +10,12 @@ Each user gets four ready-to-import connection links:
 
 | # | Protocol | Transport | Security | Port |
 |---|---|---|---|---|
-| 1 | VLESS | WebSocket | TLS + CDN | 443 |
-| 2 | VLESS | gRPC | TLS + CDN | 443 |
+| 1 | VLESS | WebSocket | TLS + CDN + ECH | 443 |
+| 2 | VLESS | gRPC | TLS + CDN + ECH | 443 |
 | 3 | VMess | HTTPUpgrade | Plain (host spoofing) | 8080 |
 | 4 | VLESS | TCP | Reality (TLS 1.3) | 8443 |
 
-- **VLESS + WS/gRPC + CDN** — traffic routes through Cloudflare CDN, hiding your server IP behind a trusted domain
+- **VLESS + WS/gRPC + CDN + ECH** — traffic routes through Cloudflare CDN; client configs enable Encrypted Client Hello (ECH is client-side only — not in the server `config.json`)
 - **VMess + HTTPUpgrade** — lightweight direct connection disguised as HTTP traffic to a known host
 - **VLESS + Reality** — direct connection with TLS 1.3 that borrows the fingerprint of a real website; no CDN needed, no third-party decryption, strongest censorship resistance
 
@@ -112,7 +112,20 @@ Prompts for a username, then:
 - Validates the config with `xray run -test` before restarting
 - Restarts Xray
 - Prints all four connection links and terminal QR codes
-- Saves links, Reality keys, and QR code PNGs to `/root/xray-configs/`
+- Saves share links, **client JSON snippets** (for CDN+TLS with ECH), Reality keys, and QR code PNGs to `/root/xray-configs/`
+
+**CDN+TLS client settings (WS and gRPC):** each user file includes ready-to-paste Xray client outbound JSON with:
+
+```json
+"tlsSettings": {
+  "serverName": "<cdn-domain>",
+  "fingerprint": "chrome",
+  "echConfigList": "<cdn-domain>+udp://1.1.1.1",
+  "echForceQuery": "full"
+}
+```
+
+Share links also include `fp=chrome` and a URL-encoded `ech` parameter. ECH does not affect the server-side Xray config.
 
 **Per-user files created:**
 
@@ -196,7 +209,11 @@ VMESS_PATH="/your-secret-path"
 XRAY_VLESS_WS_PORT="10000"
 XRAY_VLESS_GRPC_PORT="10001"
 XRAY_VMESS_PORT="10080"
+DEFAULT_ECH_DNS="udp://1.1.1.1"
+DEFAULT_ECH_FORCE_QUERY="full"
 ```
+
+`DEFAULT_ECH_DNS` and `DEFAULT_ECH_FORCE_QUERY` apply to **client configs only** (share links and JSON snippets). The CDN domain is combined automatically: `echConfigList` becomes `<cdn-domain>+udp://1.1.1.1`.
 
 You can edit this file directly at any time to change defaults without re-running setup.
 

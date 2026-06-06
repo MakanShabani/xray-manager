@@ -29,6 +29,8 @@ DEFAULT_REALITY_PORT="8443"
 VLESS_WS_PATH="/slark"
 VLESS_GRPC_SERVICE="slarkg"
 VMESS_PATH="/18E114BB-6E68-48E1-9A18-82B2C187403F"
+DEFAULT_ECH_DNS="udp://1.1.1.1"
+DEFAULT_ECH_FORCE_QUERY="full"
 
 # Xray internal listen ports (nginx proxies to these)
 XRAY_VLESS_WS_PORT="10000"
@@ -90,6 +92,8 @@ VMESS_PATH="$VMESS_PATH"
 XRAY_VLESS_WS_PORT="$XRAY_VLESS_WS_PORT"
 XRAY_VLESS_GRPC_PORT="$XRAY_VLESS_GRPC_PORT"
 XRAY_VMESS_PORT="$XRAY_VMESS_PORT"
+DEFAULT_ECH_DNS="$DEFAULT_ECH_DNS"
+DEFAULT_ECH_FORCE_QUERY="$DEFAULT_ECH_FORCE_QUERY"
 EOF
   echo -e "${GREEN}Defaults saved to ${SAVED_VARS_FILE}${NC}"
 }
@@ -167,13 +171,33 @@ get_server_ip() {
   fi
 }
 
-# ---------- Build links for a user ----------
+# ---------- Build links for a user (client-facing CDN+TLS includes ECH) ----------
+urlencode() {
+  jq -rn --arg v "$1" '$v|@uri'
+}
+
+cdn_ech_config_list() {
+  local cdn="$1"
+  echo "${cdn}+${DEFAULT_ECH_DNS}"
+}
+
+cdn_tls_share_params() {
+  local cdn="$1"
+  printf '&fp=chrome&ech=%s' "$(urlencode "$(cdn_ech_config_list "$cdn")")"
+}
+
 build_links() {
   local user="$1" uuid="$2" ip="$3" cdn="$4" vmhost="$5" rsni="$6" pubkey="$7" sid="$8"
+  local tls_params
+  tls_params=$(cdn_tls_share_params "$cdn")
 
-  LINK_WS="vless://${uuid}@${cdn}:${DEFAULT_CDN_PORT}?encryption=none&security=tls&sni=${cdn}&insecure=0&allowInsecure=0&type=ws&host=${cdn}&path=%2F${VLESS_WS_PATH##/}#${user}_WS_CDN"
+  CLIENT_UUID="$uuid"
+  CLIENT_CDN="$cdn"
+  CLIENT_VMESS_HOST="$vmhost"
 
-  LINK_GRPC="vless://${uuid}@${cdn}:${DEFAULT_CDN_PORT}?encryption=none&security=tls&sni=${cdn}&insecure=0&type=grpc&serviceName=${VLESS_GRPC_SERVICE}#${user}_gRPC_CDN"
+  LINK_WS="vless://${uuid}@${cdn}:${DEFAULT_CDN_PORT}?encryption=none&security=tls&sni=${cdn}&insecure=0&allowInsecure=0&type=ws&host=${cdn}&path=%2F${VLESS_WS_PATH##/}${tls_params}#${user}_WS_CDN_ECH"
+
+  LINK_GRPC="vless://${uuid}@${cdn}:${DEFAULT_CDN_PORT}?encryption=none&security=tls&sni=${cdn}&insecure=0&type=grpc&serviceName=${VLESS_GRPC_SERVICE}${tls_params}#${user}_gRPC_CDN_ECH"
 
   local vmess_json
   vmess_json=$(printf '{"v":"2","ps":"%s_VMess","add":"%s","port":"%s","id":"%s","aid":"0","scy":"auto","net":"httpupgrade","type":"none","host":"%s","path":"%s","tls":"","sni":"","alpn":""}' \
@@ -241,9 +265,9 @@ print_user_links() {
   echo -e "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
   echo -e "${BOLD}  User: ${GREEN}${user}${NC}"
   echo -e "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-  echo -e "${BOLD}[1] VLESS + WebSocket + TLS + CDN${NC}"
+  echo -e "${BOLD}[1] VLESS + WebSocket + TLS + CDN + ECH${NC}"
   echo -e "${DIM}${LINK_WS}${NC}\n"
-  echo -e "${BOLD}[2] VLESS + gRPC + TLS + CDN${NC}"
+  echo -e "${BOLD}[2] VLESS + gRPC + TLS + CDN + ECH${NC}"
   echo -e "${DIM}${LINK_GRPC}${NC}\n"
   echo -e "${BOLD}[3] VMess + HTTPUpgrade${NC}"
   echo -e "${DIM}${LINK_VMESS}${NC}\n"
@@ -265,10 +289,10 @@ format_user_block() {
   User: ${user}
 ============================================================
 
-[1] VLESS + WebSocket + TLS + CDN
+[1] VLESS + WebSocket + TLS + CDN + ECH
 ${LINK_WS}
 
-[2] VLESS + gRPC + TLS + CDN
+[2] VLESS + gRPC + TLS + CDN + ECH
 ${LINK_GRPC}
 
 [3] VMess + HTTPUpgrade
@@ -277,6 +301,86 @@ ${LINK_VMESS}
 [4] VLESS + Reality
 ${LINK_REALITY}
 
+EOF
+  format_cdn_tls_client_jsons "$user"
+}
+
+format_cdn_tls_client_jsons() {
+  local user="$1"
+  local ech_list
+  ech_list=$(cdn_ech_config_list "$CLIENT_CDN")
+  cat <<EOF
+
+--- Client JSON: VLESS + WebSocket + TLS + CDN + ECH ---
+{
+  "protocol": "vless",
+  "tag": "${user}_ws_cdn_ech",
+  "settings": {
+    "vnext": [
+      {
+        "address": "${CLIENT_CDN}",
+        "port": ${DEFAULT_CDN_PORT},
+        "users": [
+          {
+            "id": "${CLIENT_UUID}",
+            "encryption": "none",
+            "email": "${user}"
+          }
+        ]
+      }
+    ]
+  },
+  "streamSettings": {
+    "network": "ws",
+    "security": "tls",
+    "wsSettings": {
+      "path": "${VLESS_WS_PATH}",
+      "headers": {
+        "Host": "${CLIENT_CDN}"
+      }
+    },
+    "tlsSettings": {
+      "serverName": "${CLIENT_CDN}",
+      "fingerprint": "chrome",
+      "echConfigList": "${ech_list}",
+      "echForceQuery": "${DEFAULT_ECH_FORCE_QUERY}"
+    }
+  }
+}
+
+--- Client JSON: VLESS + gRPC + TLS + CDN + ECH ---
+{
+  "protocol": "vless",
+  "tag": "${user}_grpc_cdn_ech",
+  "settings": {
+    "vnext": [
+      {
+        "address": "${CLIENT_CDN}",
+        "port": ${DEFAULT_CDN_PORT},
+        "users": [
+          {
+            "id": "${CLIENT_UUID}",
+            "encryption": "none",
+            "email": "${user}"
+          }
+        ]
+      }
+    ]
+  },
+  "streamSettings": {
+    "network": "grpc",
+    "security": "tls",
+    "grpcSettings": {
+      "serviceName": "${VLESS_GRPC_SERVICE}"
+    },
+    "tlsSettings": {
+      "serverName": "${CLIENT_CDN}",
+      "fingerprint": "chrome",
+      "echConfigList": "${ech_list}",
+      "echForceQuery": "${DEFAULT_ECH_FORCE_QUERY}"
+    }
+  }
+}
 EOF
 }
 
